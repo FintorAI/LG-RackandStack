@@ -1,7 +1,9 @@
 {
   "dependencies": ["pyproject.toml"],
   "graphs": {
-    "lgBlank": "./src/agent/graph.py:graph"
+    "lgBlank": "src.agent.graph:graph"
   },
   "env": ".env"
 }
+
+
