@@ -1,5 +1,5 @@
 {
-  "dependencies": ["pyproject.toml"],
+  "dependencies": ["pyproject.toml", "."],
   "graphs": {
     "lgBlank": "src.agent.graph:graph"
   },
