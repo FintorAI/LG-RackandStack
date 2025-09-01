@@ -168,38 +168,74 @@ async def pull_data_node(state: State, config: RunnableConfig) -> State:
         logging.info(f"Client ID: {client_id}")
         logging.info(f"ESFuse Token: {ESFUSE_TOKEN[:10]}..." if ESFUSE_TOKEN and len(ESFUSE_TOKEN) > 10 else f"ESFuse Token: {ESFUSE_TOKEN}")
         
-        # Pull loan data using DocumentAgent
-        result = await asyncio.to_thread(
-            doc_agent.ESFuse.pull_data,
-            client_id=client_id,
-            loan_id=loan_id,
-            doc_id="953",  # Default document ID for loan data
-            esfuse_token=ESFUSE_TOKEN,
-            get_api_url=API_BASE_URL
-        )
+        # Pull data for ALL documents in document_ids
+        all_documents_data = []
         
-        # Check if the result contains an error
-        if "error" not in result:
-            # Remove raw data from the result
-            clean_result = {k: v for k, v in result.items() if k != '_raw_response'}
-            state.loan_data = clean_result
-            logging.info(f"Successfully pulled loan data!")
-            
-            # Save clean loan data to local JSON file
-            loan_data_filename = f"loan_{loan_id}_data_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            
-            def write_loan_json_file(filename, data):
-                with open(filename, 'w') as f:
-                    json.dump(data, f, indent=2)
-            
-            await asyncio.to_thread(write_loan_json_file, loan_data_filename, clean_result)
-            logging.info(f"Saved loan data to {loan_data_filename}")
-            
-            state.status = "Success"
+        if state.document_ids:
+            try:
+                doc_ids = json.loads(state.document_ids)
+                logging.info(f"Processing {len(doc_ids)} documents: {doc_ids}")
+                
+                for doc_id in doc_ids:
+                    logging.info(f"Pulling data for document {doc_id}")
+                    
+                    result = await asyncio.to_thread(
+                        doc_agent.ESFuse.pull_data,
+                        client_id=client_id,
+                        loan_id=loan_id,
+                        doc_id=str(doc_id),
+                        esfuse_token=ESFUSE_TOKEN,
+                        get_api_url=API_BASE_URL
+                    )
+                    
+                    # Check if the result contains an error
+                    if "error" not in result:
+                        # Remove raw data from the result
+                        clean_result = {k: v for k, v in result.items() if k != '_raw_response'}
+                        document_data = {
+                            "doc_id": doc_id,
+                            "data": clean_result,
+                            "status": "success"
+                        }
+                        all_documents_data.append(document_data)
+                        logging.info(f"Successfully pulled data for document {doc_id}")
+                    else:
+                        document_data = {
+                            "doc_id": doc_id,
+                            "error": result.get("error", "Unknown error"),
+                            "status": "error"
+                        }
+                        all_documents_data.append(document_data)
+                        logging.error(f"Failed to pull data for document {doc_id}: {result.get('error', 'Unknown error')}")
+                
+                # Save all documents data to local JSON file
+                all_docs_filename = f"loan_{loan_id}_all_documents_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                
+                def write_all_docs_json_file(filename, data):
+                    with open(filename, 'w') as f:
+                        json.dump(data, f, indent=2)
+                
+                await asyncio.to_thread(write_all_docs_json_file, all_docs_filename, all_documents_data)
+                logging.info(f"Saved all documents data to {all_docs_filename}")
+                
+                # Store the combined data in state
+                state.loan_data = {
+                    "total_documents": len(doc_ids),
+                    "successful_documents": len([d for d in all_documents_data if d["status"] == "success"]),
+                    "failed_documents": len([d for d in all_documents_data if d["status"] == "error"]),
+                    "documents": all_documents_data
+                }
+                
+                state.status = "Success"
+                
+            except (json.JSONDecodeError, IndexError) as e:
+                logging.error(f"Could not parse document_ids: {e}")
+                state.status = "Error"
+                state.loan_data = {"error": f"Could not parse document_ids: {e}"}
         else:
-            logging.error(f"Failed to pull loan data: {result.get('error', 'Unknown error')}")
+            logging.error("No document_ids provided")
             state.status = "Error"
-            state.loan_data = {"error": result.get("error", "Unknown error")}
+            state.loan_data = {"error": "No document_ids provided"}
         
         state.current_node = 2
         return state
