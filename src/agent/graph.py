@@ -12,11 +12,15 @@ from pydantic import BaseModel
 import asyncio
 import logging
 import datetime
+import aiohttp
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
-from cuteagent import WindowsAgent, DocumentAgent  # type: ignore
+from cuteagent import DocumentAgent  # type: ignore
 from dotenv import load_dotenv
+
+# Set environment variable to handle blocking operations properly
+os.environ["BG_JOB_ISOLATED_LOOPS"] = "true"
 
 doc_agent = DocumentAgent()
 
@@ -27,12 +31,209 @@ load_dotenv()
 # =============================================================================
 
 # Load environment variables for configuration
+# ESFuse API Configuration
 ESFUSE_TOKEN = os.getenv("ESFUSE_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL")
-ENCOMPASS_LOAN_GUID = os.getenv("ENCOMPASS_LOAN_GUID", "default_loan_guid")
-SUBMISSION_TYPE = os.getenv("SUBMISSION_TYPE", "Initial Submission")
-AUTO_LOCK = os.getenv("AUTO_LOCK", "true").lower() == "true"
+LOAN_API_BASE_URL = os.getenv("LOAN_API_BASE_URL")
+DOC_API_BASE_URL = os.getenv("DOC_API_BASE_URL")
 
+# Encompass API Configuration
+ENCOMPASS_BASE_URL = os.getenv("ENCOMPASS_BASE_URL")
+ENCOMPASS_ACCESS_TOKEN = os.getenv("ENCOMPASS_ACCESS_TOKEN")
+
+# TaskDoc API Configuration
+TASKDOC_API_TOKEN = os.getenv("TASKDOC_API_TOKEN")
+TASKDOC_AUTH_TOKEN = os.getenv("TASKDOC_AUTH_TOKEN")
+
+# Submission Configuration
+SUBMISSION_TYPE = os.getenv("SUBMISSION_TYPE", "Initial Submission")
+AUTO_LOCK = os.getenv("AUTO_LOCK", "false").lower() == "true"
+
+# Validate required environment variables
+def validate_environment():
+    """Validate that all required environment variables are set."""
+    required_vars = [
+        "ESFUSE_TOKEN",
+        "LOAN_API_BASE_URL", 
+        "DOC_API_BASE_URL",
+        "ENCOMPASS_BASE_URL",
+        "ENCOMPASS_ACCESS_TOKEN",
+        "TASKDOC_API_TOKEN",
+        "TASKDOC_AUTH_TOKEN"
+    ]
+    
+    missing_vars = []
+    for var in required_vars:
+        if not os.getenv(var):
+            missing_vars.append(var)
+    
+    if missing_vars:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    
+    logging.info("✅ All required environment variables are set")
+
+# Note: Environment validation will be done at runtime in the first node
+
+# =============================================================================
+# ASYNC API HELPERS
+# =============================================================================
+
+async def async_pull_loan_data(client_id: str, loan_id: str, esfuse_token: str, get_api_base: str) -> Dict[str, Any]:
+    """Async version of DocumentAgent pull_data for loan data."""
+    try:
+        api_url = f"{get_api_base}/loan?clientId={client_id}&loanId={loan_id}"
+        headers = {"Authorization": f"Bearer {esfuse_token}"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    raw_data = await response.json()
+                    
+                    # Parse the data (simplified version of the original parsing)
+                    parsed_data = {
+                        "client_id": client_id,
+                        "loan_id": loan_id,
+                        "api_url": api_url,
+                        "status": "success"
+                    }
+                    
+                    # Extract some basic loan info if available
+                    if isinstance(raw_data, dict):
+                        parsed_data["raw_keys"] = list(raw_data.keys())
+                        if "clientId" in raw_data:
+                            parsed_data["response_client_id"] = raw_data["clientId"]
+                        if "loanId" in raw_data:
+                            parsed_data["response_loan_id"] = raw_data["loanId"]
+                    
+                    return {
+                        "success": True,
+                        "raw": raw_data,
+                        "parsed": parsed_data,
+                        "api_url": api_url,
+                        "client_id": client_id,
+                        "loan_id": loan_id
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"API call failed with status {response.status}: {await response.text()}",
+                        "api_url": api_url
+                    }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"API request failed: {str(e)}"
+        }
+
+async def async_pull_doc_data(api_base: str, token: str, client_id: str, doc_id: str) -> Dict[str, Any]:
+    """Async version of DocumentAgent pull_doc for document data."""
+    try:
+        api_url = f"{api_base}/doc?clientId={client_id}&docId={doc_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    # Try to parse as JSON first
+                    try:
+                        response_data = await response.json()
+                        return {
+                            "success": True,
+                            "response_type": "json",
+                            "response_data": response_data,
+                            "api_url": api_url,
+                            "client_id": client_id,
+                            "doc_id": doc_id
+                        }
+                    except:
+                        # If not JSON, treat as binary (PDF) but don't save
+                        content = await response.read()
+                        
+                        return {
+                            "success": True,
+                            "response_type": "pdf",
+                            "file_size": len(content),
+                            "api_url": api_url,
+                            "client_id": client_id,
+                            "doc_id": doc_id
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"API request failed with status {response.status}",
+                        "response_text": await response.text(),
+                        "status_code": response.status
+                    }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Request failed: {str(e)}"
+        }
+
+async def async_push_data(field_updates: Dict, client_id: str, loan_id: str, 
+                         get_api_base: str, esfuse_token: str, base_url: str, access_token: str) -> Dict[str, Any]:
+    """Async version of DocumentAgent push_data for Encompass updates."""
+    try:
+        # First get the loan GUID
+        loan_result = await async_pull_loan_data(client_id, loan_id, esfuse_token, get_api_base)
+        if not loan_result.get("success"):
+            return {"success": False, "error": "Failed to get loan GUID"}
+        
+        # Extract encompass_loan_guid from response (simplified)
+        raw_data = loan_result.get("raw", {})
+        encompass_loan_guid = None
+        
+        # Search for encompass_loan_guid in the response
+        def find_guid(data, path=""):
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if key.endswith("encompass_loan_guid") and value:
+                        return value
+                    if isinstance(value, (dict, list)):
+                        result = find_guid(value, f"{path}.{key}")
+                        if result:
+                            return result
+            elif isinstance(data, list):
+                for i, item in enumerate(data):
+                    result = find_guid(item, f"{path}[{i}]")
+                    if result:
+                        return result
+            return None
+        
+        encompass_loan_guid = find_guid(raw_data)
+        
+        if not encompass_loan_guid:
+            return {"success": False, "error": "No encompass_loan_guid found in loan response"}
+        
+        # Push updates to Encompass
+        write_loan_url = f"{base_url}/api/v1/write_loan_data?token={access_token}"
+        request_body = {
+            "encompass_loan_guid": encompass_loan_guid,
+            "json_data": json.dumps(field_updates)
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(write_loan_url, json=request_body, timeout=30) as response:
+                if response.status == 200:
+                    response_data = await response.json() if response.content_length else None
+                    return {
+                        "success": True,
+                        "encompass_loan_guid": encompass_loan_guid,
+                        "fields_updated": list(field_updates.keys()),
+                        "response": response_data,
+                        "status_code": response.status
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Encompass API request failed with status {response.status}",
+                        "response_text": await response.text(),
+                        "status_code": response.status
+                    }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Push data error: {str(e)}"
+        }
 
 # =============================================================================
 # STATE DEFINITION
@@ -56,6 +257,20 @@ class State(BaseModel):
     # Internal state fields (not from user input)
     loan_data: Dict[str, Any] = {}
     documents_stored_list: List[Dict[str, Any]] = []
+    
+    # Field updates for Encompass (user can provide field_id: value mappings)
+    # Common field IDs:
+    # 4000: first_name, 4001: middle_name, 4002: last_name
+    # 1204: email, 65: SSN, 1402: date_of_birth
+    # FR0106: city, FR0126: address_1
+    field_updates: Dict[str, str] = {}
+    
+    # Workflow state fields
+    pull_data_result: Dict[str, Any] = {}
+    pull_doc_results: List[Dict[str, Any]] = []
+    push_data_result: Dict[str, Any] = {}
+    push_doc_result: Dict[str, Any] = {}
+    workflow_summary: Dict[str, Any] = {}
 
 # =============================================================================
 # CONFIGURATION
@@ -73,6 +288,8 @@ class State(BaseModel):
 async def extract_input_fields(state: State, config: RunnableConfig) -> State:
     """Extract only allowed fields from user_input (string JSON or dict format)."""
     try:
+        # Validate environment variables at runtime
+        await asyncio.to_thread(validate_environment)
         if state.user_input:
             if isinstance(state.user_input, str):
                 # Try to parse as JSON
@@ -111,22 +328,12 @@ async def extract_input_fields(state: State, config: RunnableConfig) -> State:
                 state.documents_processed = str(input_data["documents_processed"])
                 logging.info(f"Extracted documents_processed: {state.documents_processed}")
             
-            # Validate required fields
-            missing_fields = []
-            if not state.loan_id:
-                missing_fields.append("loan_id")
-            if not state.client_id:
-                missing_fields.append("client_id")
-            if not state.document_ids:
-                missing_fields.append("document_ids")
+            if "field_updates" in input_data and isinstance(input_data["field_updates"], dict):
+                state.field_updates = {str(k): str(v) for k, v in input_data["field_updates"].items()}
+                logging.info(f"Extracted field_updates: {state.field_updates}")
             
-            if missing_fields:
-                error_msg = f"Missing required fields: {', '.join(missing_fields)}"
-                logging.error(error_msg)
-                state.status = "Error"
-                state.loan_data = {"error": error_msg}
-            else:
-                state.status = "Success"
+            # All fields now have defaults, so no validation needed
+            state.status = "Success"
             
             state.current_node = 1
         else:
@@ -145,122 +352,89 @@ async def extract_input_fields(state: State, config: RunnableConfig) -> State:
 async def pull_data_node(state: State, config: RunnableConfig) -> State:
     """Pull loan data using DocumentAgent ESFuse functionality."""
     try:
-        # Require these values from user input
-        if not state.loan_id:
-            logging.error("loan_id is required from user input")
-            state.status = "Error"
-            state.loan_data = {"error": "loan_id is required from user input"}
-            state.current_node = 2
-            return state
-            
-        if not state.client_id:
-            logging.error("client_id is required from user input")
-            state.status = "Error"
-            state.loan_data = {"error": "client_id is required from user input"}
-            state.current_node = 2
-            return state
-        
         loan_id = state.loan_id
         client_id = state.client_id
         
         logging.info(f"Pulling data for loan_id: {loan_id}")
-        logging.info(f"API URL: {API_BASE_URL}")
+        logging.info(f"API URL: {LOAN_API_BASE_URL}")
         logging.info(f"Client ID: {client_id}")
         logging.info(f"ESFuse Token: {ESFUSE_TOKEN[:10]}..." if ESFUSE_TOKEN and len(ESFUSE_TOKEN) > 10 else f"ESFuse Token: {ESFUSE_TOKEN}")
         
-        # Pull data for ALL documents in document_ids
-        all_documents_data = []
+        # Pull loan data using async API
+        result = await async_pull_loan_data(
+            client_id=client_id,
+            loan_id=loan_id,
+            esfuse_token=ESFUSE_TOKEN,
+            get_api_base=LOAN_API_BASE_URL
+        )
         
-        if state.document_ids:
-            try:
-                doc_ids = json.loads(state.document_ids)
-                logging.info(f"Processing {len(doc_ids)} documents: {doc_ids}")
-                
-                for doc_id in doc_ids:
-                    logging.info(f"Pulling data for document {doc_id}")
-                    
-                    result = await asyncio.to_thread(
-                        doc_agent.ESFuse.pull_data,
-                        client_id=client_id,
-                        loan_id=loan_id,
-                        doc_id=str(doc_id),
-                        esfuse_token=ESFUSE_TOKEN,
-                        get_api_url=API_BASE_URL
-                    )
-                    
-                    # Check if the result contains an error
-                    if "error" not in result:
-                        # Remove raw data from the result
-                        clean_result = {k: v for k, v in result.items() if k != '_raw_response'}
-                        document_data = {
-                            "doc_id": doc_id,
-                            "data": clean_result,
-                            "status": "success"
-                        }
-                        all_documents_data.append(document_data)
-                        logging.info(f"Successfully pulled data for document {doc_id}")
-                    else:
-                        document_data = {
-                            "doc_id": doc_id,
-                            "error": result.get("error", "Unknown error"),
-                            "status": "error"
-                        }
-                        all_documents_data.append(document_data)
-                        logging.error(f"Failed to pull data for document {doc_id}: {result.get('error', 'Unknown error')}")
-                
-                # Save all documents data to local JSON file
-                all_docs_filename = f"loan_{loan_id}_all_documents_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                
-                def write_all_docs_json_file(filename, data):
-                    with open(filename, 'w') as f:
-                        json.dump(data, f, indent=2)
-                
-                await asyncio.to_thread(write_all_docs_json_file, all_docs_filename, all_documents_data)
-                logging.info(f"Saved all documents data to {all_docs_filename}")
-                
-                # Store the combined data in state
-                state.loan_data = {
-                    "total_documents": len(doc_ids),
-                    "successful_documents": len([d for d in all_documents_data if d["status"] == "success"]),
-                    "failed_documents": len([d for d in all_documents_data if d["status"] == "error"]),
-                    "documents": all_documents_data
-                }
-                
-                state.status = "Success"
-                
-            except (json.JSONDecodeError, IndexError) as e:
-                logging.error(f"Could not parse document_ids: {e}")
-                state.status = "Error"
-                state.loan_data = {"error": f"Could not parse document_ids: {e}"}
-        else:
-            logging.error("No document_ids provided")
-            state.status = "Error"
-            state.loan_data = {"error": "No document_ids provided"}
-        
-        state.current_node = 2
-        return state
-        
-        # Check if the result contains an error (DocumentAgent returns error dict on failure, data dict on success)
-        if "error" not in result:
+        # Check if the result contains an error
+        if result.get("success", False):
+            state.pull_data_result = result
             state.loan_data = result
             logging.info(f"Successfully pulled loan data!")
-            logging.info(f"Has data object: {result.get('hasDataObject', 'N/A')}")
-            logging.info(f"Raw response keys: {list(result.keys())}")
+            logging.info(f"Client ID: {result.get('client_id')}")
+            logging.info(f"Loan ID: {result.get('loan_id')}")
+            logging.info(f"API URL: {result.get('api_url')}")
             
-            # Log some key borrower information if available
-            if '_raw_response' in result and 'dataObject' in result['_raw_response']:
-                data_obj = result['_raw_response']['dataObject']
-                if 'borrowers' in data_obj and data_obj['borrowers']:
-                    borrower = data_obj['borrowers'][0]
-                    logging.info(f"Borrower: {borrower.get('firstName', 'N/A')} {borrower.get('lastName', 'N/A')}")
-                    logging.info(f"SSN: ***-**-{borrower.get('last4SSN', 'N/A')}")
+            # Parse borrower data from raw response and create field updates
+            raw_data = result.get("raw", {})
+            if raw_data and "loaninfo" in raw_data:
+                loaninfo = raw_data["loaninfo"]
+                field_updates = {}
+                
+                # Parse borrower information
+                borrowers = loaninfo.get("borrowers_attributes", [])
+                if borrowers:
+                    main_borrower = borrowers[0]  # Get first/main borrower
+                    
+                    # Map borrower fields to Encompass field IDs
+                    if "first_name" in main_borrower and main_borrower["first_name"]:
+                        field_updates["4000"] = main_borrower["first_name"]
+                        logging.info(f"Parsed first_name: {main_borrower['first_name']}")
+                    
+                    if "middle_name" in main_borrower and main_borrower["middle_name"]:
+                        field_updates["4001"] = main_borrower["middle_name"]
+                        logging.info(f"Parsed middle_name: {main_borrower['middle_name']}")
+                    
+                    if "last_name" in main_borrower and main_borrower["last_name"]:
+                        field_updates["4002"] = main_borrower["last_name"]
+                        logging.info(f"Parsed last_name: {main_borrower['last_name']}")
+                    
+                    if "email" in main_borrower and main_borrower["email"]:
+                        field_updates["1204"] = main_borrower["email"]
+                        logging.info(f"Parsed email: {main_borrower['email']}")
+                    
+                    if "ssn" in main_borrower and main_borrower["ssn"]:
+                        field_updates["65"] = main_borrower["ssn"]
+                        logging.info(f"Parsed SSN: {main_borrower['ssn']}")
+                    
+                    if "date_of_birth" in main_borrower and main_borrower["date_of_birth"]:
+                        field_updates["1402"] = main_borrower["date_of_birth"]
+                        logging.info(f"Parsed date_of_birth: {main_borrower['date_of_birth']}")
+                
+                # Parse address information
+                if "city" in loaninfo and loaninfo["city"]:
+                    field_updates["FR0106"] = loaninfo["city"]
+                    logging.info(f"Parsed city: {loaninfo['city']}")
+                
+                if "address1" in loaninfo and loaninfo["address1"]:
+                    field_updates["FR0126"] = loaninfo["address1"]
+                    logging.info(f"Parsed address1: {loaninfo['address1']}")
+                
+                # Store parsed field updates in state for push_data_node
+                state.field_updates = field_updates
+                logging.info(f"Created field_updates from loan data: {list(field_updates.keys())}")
+            
+            # Data available in state - no file saving
             
             state.status = "Success"
         else:
-            logging.error(f"Failed to pull loan data: {result.get('error', 'Unknown error')}")
-            logging.error(f"Full API response: {result}")  # Log the full response for debugging
+            error_msg = result.get('error', 'Unknown error')
+            logging.error(f"Failed to pull loan data: {error_msg}")
             state.status = "Error"
-            state.loan_data = {"error": result.get("error", "Unknown error")}
+            state.pull_data_result = {"error": error_msg}
+            state.loan_data = {"error": error_msg}
         
         state.current_node = 2
         return state
@@ -283,94 +457,41 @@ async def pull_doc_node(state: State, config: RunnableConfig) -> State:
             
             all_documents_data = []
             for doc_id in doc_ids:
-                # Pull data for each document using user input values
-                result = await asyncio.to_thread(
-                    doc_agent.ESFuse.pull_data,
+                # Pull document data using async API
+                result = await async_pull_doc_data(
+                    api_base=DOC_API_BASE_URL,
+                    token=ESFUSE_TOKEN,
                     client_id=state.client_id,
-                    loan_id=state.loan_id,
-                    doc_id=str(doc_id),
-                    esfuse_token=ESFUSE_TOKEN,
-                    get_api_url=API_BASE_URL
+                    doc_id=str(doc_id)
                 )
                 
-                # Extract PDF URL from response and download the PDF
-                pdf_url = None
-                if "error" not in result and "_raw_response" in result:
-                    raw_response = result["_raw_response"]
-                    if "url" in raw_response:
-                        pdf_url = raw_response["url"]
-                        logging.info(f"Found PDF URL for document {doc_id}: {pdf_url}")
-                
-                # Download PDF using the URL from response
-                pdf_result = None
-                if pdf_url:
-                    try:
-                        import requests
-                        pdf_response = await asyncio.to_thread(requests.get, pdf_url, timeout=30)
-                        if pdf_response.status_code == 200:
-                            # Save PDF file locally
-                            pdf_filename = f"{doc_id}.pdf"
-                            def write_pdf_file(filename, content):
-                                with open(filename, 'wb') as f:
-                                    f.write(content)
-                            
-                            await asyncio.to_thread(write_pdf_file, pdf_filename, pdf_response.content)
-                            pdf_result = {
-                                "success": True,
-                                "response_type": "pdf",
-                                "filename": pdf_filename,
-                                "file_size": len(pdf_response.content)
-                            }
-                            logging.info(f"Downloaded PDF document {doc_id} to {pdf_filename}")
-                        else:
-                            pdf_result = {
-                                "success": False,
-                                "error": f"Failed to download PDF: HTTP {pdf_response.status_code}"
-                            }
-                            logging.warning(f"Failed to download PDF for document {doc_id}: HTTP {pdf_response.status_code}")
-                    except Exception as e:
-                        pdf_result = {
-                            "success": False,
-                            "error": f"Exception downloading PDF: {str(e)}"
-                        }
-                        logging.warning(f"Exception downloading PDF for document {doc_id}: {str(e)}")
-                else:
-                    pdf_result = {
-                        "success": False,
-                        "error": "No PDF URL found in response"
-                    }
-                    logging.warning(f"No PDF URL found for document {doc_id}")
-                
-                if "error" not in result:
-                    # Extract only the dataObject.fields from the raw response
-                    raw_response = result.get("_raw_response", {})
-                    data_object = raw_response.get("dataObject", {})
-                    extracted_fields = data_object.get("fields", {})
-                    
+                # Handle the result from pull_doc
+                if result.get("success", False):
                     clean_result = {
                         "doc_id": doc_id,
-                        "extracted_fields": extracted_fields  # Only the extracted data fields
+                        "response_type": result.get("response_type"),
+                        "api_url": result.get("api_url"),
+                        "client_id": result.get("client_id"),
+                        "success": True
                     }
                     
+                    # Add response data based on type
+                    if result.get("response_type") == "json":
+                        clean_result["response_data"] = result.get("response_data", {})
+                        logging.info(f"Successfully pulled JSON data for document {doc_id}")
+                    elif result.get("response_type") == "pdf":
+                        clean_result["file_size"] = result.get("file_size")
+                        logging.info(f"Successfully retrieved PDF data for document {doc_id} (size: {result.get('file_size', 0)} bytes)")
+                    
                     all_documents_data.append(clean_result)
-                    logging.info(f"Successfully pulled data for document {doc_id}")
-                    
-
-                    
-                    # Log PDF download result
-                    if pdf_result and "success" in pdf_result and pdf_result["success"]:
-                        if pdf_result.get("response_type") == "pdf":
-                            logging.info(f"Downloaded PDF document {doc_id} to {pdf_result.get('filename', 'unknown')}")
-                        else:
-                            logging.info(f"Document {doc_id} data retrieved (JSON format)")
-                    else:
-                        logging.warning(f"Failed to download PDF for document {doc_id}: {pdf_result.get('error', 'Unknown error') if pdf_result else 'No result'}")
+                    logging.info(f"Successfully processed document {doc_id}")
                     
                 else:
                     logging.error(f"Failed to pull data for document {doc_id}: {result.get('error')}")
                     all_documents_data.append({
                         "doc_id": doc_id,
-                        "error": result.get("error", "Unknown error")
+                        "error": result.get("error", "Unknown error"),
+                        "success": False
                     })
             
             # Create the final output structure
@@ -380,15 +501,14 @@ async def pull_doc_node(state: State, config: RunnableConfig) -> State:
                 "task_id": state.task_id,
                 "status": state.status,
                 "total_documents": len(doc_ids),
-                "successful_pulls": len([doc for doc in all_documents_data if "error" not in doc]),
-                "failed_pulls": len([doc for doc in all_documents_data if "error" in doc]),
+                "successful_pulls": len([doc for doc in all_documents_data if doc.get("success", False)]),
+                "failed_pulls": len([doc for doc in all_documents_data if not doc.get("success", False)]),
                 "documents": all_documents_data,
-                "timestamp": str(datetime.datetime.now())
+                "timestamp": await asyncio.to_thread(lambda: str(datetime.datetime.now()))
             }
             
-
-            
             # Store the documents data in state for use by push_data_node
+            state.pull_doc_results = all_documents_data
             state.documents_stored_list = all_documents_data
             state.loan_data = output_data
             state.status = "Success"
@@ -396,7 +516,7 @@ async def pull_doc_node(state: State, config: RunnableConfig) -> State:
             state.status = "Error"
             state.loan_data = {"error": "No document_ids provided"}
         
-        state.current_node = 2
+        state.current_node = 3
         return state
         
     except Exception as e:
@@ -409,38 +529,49 @@ async def pull_doc_node(state: State, config: RunnableConfig) -> State:
 async def push_data_node(state: State, config: RunnableConfig) -> State:
     """Push field updates to Encompass using DocumentAgent ESFuse functionality."""
     try:
-        # Use environment variables for all configuration
-        field_updates = {"example_field": "example_value"}  # Default field updates
-        encompass_loan_guid = ENCOMPASS_LOAN_GUID
-        base_url = API_BASE_URL
-        access_token = ESFUSE_TOKEN
+        # Use field_updates from state, fallback to default test value if none provided
+        field_updates = state.field_updates if state.field_updates else {"4000": "DefaultTestValue"}
+        client_id = state.client_id
+        loan_id = state.loan_id
+        get_api_base = LOAN_API_BASE_URL
+        esfuse_token = ESFUSE_TOKEN
+        base_url = ENCOMPASS_BASE_URL
+        access_token = ENCOMPASS_ACCESS_TOKEN
         
-        logging.info(f"Pushing field updates for loan GUID: {encompass_loan_guid}")
+        logging.info(f"Pushing field updates for loan: {loan_id}")
+        logging.info(f"Client ID: {client_id}")
         logging.info(f"Fields to update: {list(field_updates.keys())}")
+        logging.info(f"Field values: {field_updates}")
+        logging.info(f"Encompass URL: {base_url}")
         
-        # Push data using DocumentAgent - wrap in asyncio.to_thread to avoid blocking
-        result = await asyncio.to_thread(
-            doc_agent.ESFuse.push_data,
-            field_updates,
-            encompass_loan_guid,
-            base_url,
-            access_token
+        # Push data using async API
+        result = await async_push_data(
+            field_updates=field_updates,
+            client_id=client_id,
+            loan_id=loan_id,
+            get_api_base=get_api_base,
+            esfuse_token=esfuse_token,
+            base_url=base_url,
+            access_token=access_token
         )
         
         # Check if the result contains an error
-        if "error" not in result:
+        if result.get("success", False):
+            state.push_data_result = result
             state.loan_data = result
             logging.info(f"Successfully pushed field updates to Encompass")
+            logging.info(f"Encompass GUID: {result.get('encompass_loan_guid')}")
             logging.info(f"Fields updated: {result.get('fields_updated', [])}")
             logging.info(f"Status code: {result.get('status_code', 'N/A')}")
             state.status = "Success"
         else:
-            logging.error(f"Failed to push field updates: {result.get('error', 'Unknown error')}")
-            logging.error(f"Full API response: {result}")
+            error_msg = result.get('error', 'Unknown error')
+            logging.error(f"Failed to push field updates: {error_msg}")
             state.status = "Error"
-            state.loan_data = {"error": result.get("error", "Unknown error")}
+            state.push_data_result = {"error": error_msg}
+            state.loan_data = {"error": error_msg}
         
-        state.current_node = 3
+        state.current_node = 4
         return state
         
     except Exception as e:
@@ -453,67 +584,78 @@ async def push_data_node(state: State, config: RunnableConfig) -> State:
 async def push_doc_node(state: State, config: RunnableConfig) -> State:
     """Create loan submission and associate documents using DocumentAgent ESFuse functionality."""
     try:
-        # Require these values from user input
-        if not state.loan_id:
-            logging.error("loan_id is required from user input")
-            state.status = "Error"
-            state.loan_data = {"error": "loan_id is required from user input"}
-            state.current_node = 4
-            return state
-            
-        if not state.document_ids:
-            logging.error("document_ids is required from user input")
-            state.status = "Error"
-            state.loan_data = {"error": "document_ids is required from user input"}
-            state.current_node = 4
-            return state
-        
-        loan_id = state.loan_id
-        document_ids = state.document_ids
-        base_url = API_BASE_URL
-        access_token = ESFUSE_TOKEN
+        # Use values from state
         submission_type = SUBMISSION_TYPE
         auto_lock = AUTO_LOCK
+        client_id = state.client_id
+        loan_id = state.loan_id
         
-        # Parse document_ids if it's a JSON string
-        if isinstance(document_ids, str):
+        # Parse document_ids from state
+        import json
+        if state.document_ids:
             try:
-                import json
-                document_ids = json.loads(document_ids)
+                doc_ids = json.loads(state.document_ids)
+                # Use the first document ID for push_doc
+                doc_id = str(doc_ids[0]) if doc_ids else "953"
             except json.JSONDecodeError:
-                document_ids = [document_ids]
+                doc_id = str(state.document_ids)
+        else:
+            doc_id = "953"  # Fallback document ID
         
-        logging.info(f"Creating submission for loan_id: {loan_id}")
-        logging.info(f"Document IDs: {document_ids}")
+        token = ESFUSE_TOKEN
+        api_base = DOC_API_BASE_URL
+        taskdoc_api_token = TASKDOC_API_TOKEN
+        taskdoc_auth_token = TASKDOC_AUTH_TOKEN
+        
+        logging.info(f"Creating submission using push_doc method")
+        logging.info(f"Client ID: {client_id}")
+        logging.info(f"Loan ID: {loan_id}")
+        logging.info(f"Document ID: {doc_id}")
+        logging.info(f"API Base: {api_base}")
         logging.info(f"Submission type: {submission_type}")
         logging.info(f"Auto lock: {auto_lock}")
         
         # Push document using DocumentAgent - wrap in asyncio.to_thread to avoid blocking
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
-            loan_id=int(loan_id),
-            document_ids=document_ids,
-            base_url=base_url,
-            access_token=access_token,
+            client_id=client_id,
+            doc_id=doc_id,
+            token=token,
+            api_base=api_base,
             submission_type=submission_type,
-            auto_lock=auto_lock
+            auto_lock=auto_lock,
+            taskdoc_api_token=taskdoc_api_token,
+            taskdoc_auth_token=taskdoc_auth_token
         )
         
         # Check if the result contains an error
-        if "error" not in result:
+        if result.get("success", False):
+            state.push_doc_result = result
             state.loan_data = result
             logging.info(f"Successfully created loan submission")
-            logging.info(f"Loan ID: {result.get('loan_id', 'N/A')}")
-            logging.info(f"Document IDs: {result.get('document_ids', [])}")
-            logging.info(f"Submission type: {result.get('submission_type', 'N/A')}")
+            logging.info(f"Message: {result.get('message', 'N/A')}")
+            
+            # Log DocRepo fields if available
+            docrepo_fields = result.get("docrepo_fields", {})
+            if docrepo_fields:
+                logging.info(f"Task ID: {docrepo_fields.get('taskId', 'N/A')}")
+                logging.info(f"Loan ID: {docrepo_fields.get('loanId', 'N/A')}")
+                
+                # Log submission results if available
+                submission_result = docrepo_fields.get('submission_result', {})
+                if submission_result:
+                    logging.info(f"Submission Success: {submission_result.get('success', False)}")
+                    logging.info(f"Submission Status Code: {submission_result.get('status_code', 'N/A')}")
+            
             state.status = "Success"
         else:
-            logging.error(f"Failed to create submission: {result.get('error', 'Unknown error')}")
-            logging.error(f"Full API response: {result}")
+            error_msg = result.get('error', 'Unknown error')
+            logging.error(f"Failed to create submission: {error_msg}")
             state.status = "Error"
-            state.loan_data = {"error": result.get("error", "Unknown error")}
+            state.push_doc_result = {"error": error_msg}
+            state.loan_data = {"error": error_msg}
         
-        state.current_node = 4
+        state.current_node = 5
         return state
         
     except Exception as e:
@@ -523,6 +665,45 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         state.loan_data = {"error": str(e)}
         return state
 
+async def workflow_summary_node(state: State, config: RunnableConfig) -> State:
+    """Create a comprehensive workflow summary."""
+    try:
+        summary = {
+            "workflow_status": state.status,
+            "total_nodes_completed": state.current_node,
+            "pull_data_success": state.pull_data_result.get("success", False) if state.pull_data_result else False,
+            "pull_doc_success": len([doc for doc in state.pull_doc_results if doc.get("success", False)]) > 0 if state.pull_doc_results else False,
+            "push_data_success": state.push_data_result.get("success", False) if state.push_data_result else False,
+            "push_doc_success": state.push_doc_result.get("success", False) if state.push_doc_result else False,
+            "documents_processed": len(state.pull_doc_results) if state.pull_doc_results else 0,
+            "successful_documents": len([doc for doc in state.pull_doc_results if doc.get("success", False)]) if state.pull_doc_results else 0,
+            "failed_documents": len([doc for doc in state.pull_doc_results if not doc.get("success", False)]) if state.pull_doc_results else 0,
+            "timestamp": str(datetime.datetime.now())
+        }
+        
+        state.workflow_summary = summary
+        state.loan_data = summary
+        
+        logging.info("=" * 60)
+        logging.info("WORKFLOW SUMMARY")
+        logging.info("=" * 60)
+        logging.info(f"Overall Status: {summary['workflow_status']}")
+        logging.info(f"Nodes Completed: {summary['total_nodes_completed']}")
+        logging.info(f"Pull Data: {'✅' if summary['pull_data_success'] else '❌'}")
+        logging.info(f"Pull Docs: {'✅' if summary['pull_doc_success'] else '❌'}")
+        logging.info(f"Push Data: {'✅' if summary['push_data_success'] else '❌'}")
+        logging.info(f"Push Docs: {'✅' if summary['push_doc_success'] else '❌'}")
+        logging.info(f"Documents Processed: {summary['documents_processed']}")
+        logging.info(f"Successful Documents: {summary['successful_documents']}")
+        logging.info(f"Failed Documents: {summary['failed_documents']}")
+        logging.info("=" * 60)
+        
+        return state
+        
+    except Exception as e:
+        logging.error(f"Error in workflow_summary_node: {e}")
+        state.workflow_summary = {"error": str(e)}
+        return state
 
 
 # =============================================================================
@@ -530,28 +711,26 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
 # Define and compile your workflow graph here
 # =============================================================================
 
-# Define your graph here - customize as needed
+# Define your graph here - comprehensive workflow
 graph = (
     StateGraph(State)
     .add_node("extract_input", extract_input_fields)
     .add_node("pull_data", pull_data_node)
     .add_node("pull_doc", pull_doc_node)
+    .add_node("push_data", push_data_node)
+    .add_node("push_doc", push_doc_node)
+    .add_node("summary", workflow_summary_node)
     
     .add_edge("__start__", "extract_input")
     .add_edge("extract_input", "pull_data")
     .add_edge("pull_data", "pull_doc")
-    .add_edge("pull_doc", "__end__")
-    # .add_edge("push_data", "__end__")
-
-    # .add_edge("push_data", "push_doc")
-    # .add_edge("push_doc", "__end__")
+    .add_edge("pull_doc", "push_data")
+    .add_edge("push_data", "push_doc")
+    .add_edge("push_doc", "summary")
+    .add_edge("summary", "__end__")
     .compile(
         name="lgCreditReportUnited",
+        checkpointer=None,  # Disable checkpointing to avoid blocking calls
     )
 )
-
-
-# curl -X GET "https://fllvck48n4.execute-api.us-west-1.amazonaws.com/prod/loan?clientId=loan_25&loanId=25" -H "Authorization: Bearer esfuse-token"
-
-# curl -X GET "https://m49lxh6q5d.execute-api.us-west-1.amazonaws.com/prod/doc?clientId=loan_25&docId=953" -H "Authorization: Bearer esfuse-token"
 
