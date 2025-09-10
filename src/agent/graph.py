@@ -529,8 +529,9 @@ async def pull_doc_node(state: State, config: RunnableConfig) -> State:
 async def push_data_node(state: State, config: RunnableConfig) -> State:
     """Push field updates to Encompass using DocumentAgent ESFuse functionality."""
     try:
-        # Use field_updates from state, fallback to default test value if none provided
+        # Use hardcoded field updates for testing
         field_updates = state.field_updates if state.field_updates else {"4000": "DefaultTestValue"}
+        # field_updates = {"4000": "Nick"}
         client_id = state.client_id
         loan_id = state.loan_id
         get_api_base = LOAN_API_BASE_URL
@@ -729,7 +730,7 @@ graph = (
     .add_edge("push_doc", "summary")
     .add_edge("summary", "__end__")
     .compile(
-        name="lgCreditReportUnited",
+        name="lgRackandStack",
         checkpointer=None,  # Disable checkpointing to avoid blocking calls
     )
 )
