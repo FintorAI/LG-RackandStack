@@ -173,36 +173,10 @@ async def async_push_data(field_updates: Dict, client_id: str, loan_id: str,
                          get_api_base: str, esfuse_token: str, base_url: str, access_token: str) -> Dict[str, Any]:
     """Async version of DocumentAgent push_data for Encompass updates."""
     try:
-        # First get the loan GUID
-        loan_result = await async_pull_loan_data(client_id, loan_id, esfuse_token, get_api_base)
-        if not loan_result.get("success"):
-            return {"success": False, "error": "Failed to get loan GUID"}
+        # Use loan_id directly as the encompass_loan_guid
+        encompass_loan_guid = loan_id
         
-        # Extract encompass_loan_guid from response (simplified)
-        raw_data = loan_result.get("raw", {})
-        encompass_loan_guid = None
-        
-        # Search for encompass_loan_guid in the response
-        def find_guid(data, path=""):
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if key.endswith("encompass_loan_guid") and value:
-                        return value
-                    if isinstance(value, (dict, list)):
-                        result = find_guid(value, f"{path}.{key}")
-                        if result:
-                            return result
-            elif isinstance(data, list):
-                for i, item in enumerate(data):
-                    result = find_guid(item, f"{path}[{i}]")
-                    if result:
-                        return result
-            return None
-        
-        encompass_loan_guid = find_guid(raw_data)
-        
-        if not encompass_loan_guid:
-            return {"success": False, "error": "No encompass_loan_guid found in loan response"}
+        logging.info(f"Using loan_id as encompass_loan_guid: {encompass_loan_guid}")
         
         # Push updates to Encompass
         write_loan_url = f"{base_url}/api/v1/write_loan_data?token={access_token}"
@@ -377,56 +351,74 @@ async def pull_data_node(state: State, config: RunnableConfig) -> State:
             logging.info(f"Loan ID: {result.get('loan_id')}")
             logging.info(f"API URL: {result.get('api_url')}")
             
-            # Parse borrower data from raw response and create field updates
+            # Parse loan data from raw response and create field updates
             raw_data = result.get("raw", {})
             if raw_data and "loaninfo" in raw_data:
                 loaninfo = raw_data["loaninfo"]
                 field_updates = {}
                 
-                # Parse borrower information
+                # Parse borrower information from borrowers_attributes array
                 borrowers = loaninfo.get("borrowers_attributes", [])
                 if borrowers:
-                    main_borrower = borrowers[0]  # Get first/main borrower
+                    # Find main borrower or use first borrower
+                    main_borrower = None
+                    for borrower in borrowers:
+                        if borrower.get("main_borrower", False):
+                            main_borrower = borrower
+                            break
+                    if not main_borrower:
+                        main_borrower = borrowers[0]
+                    
+                    logging.info(f"Processing borrower: {main_borrower.get('first_name')} {main_borrower.get('last_name')}")
                     
                     # Map borrower fields to Encompass field IDs
-                    if "first_name" in main_borrower and main_borrower["first_name"]:
+                    if main_borrower.get("first_name"):
                         field_updates["4000"] = main_borrower["first_name"]
-                        logging.info(f"Parsed first_name: {main_borrower['first_name']}")
+                        logging.info(f"  ✓ first_name: {main_borrower['first_name']}")
                     
-                    if "middle_name" in main_borrower and main_borrower["middle_name"]:
+                    if main_borrower.get("middle_name"):
                         field_updates["4001"] = main_borrower["middle_name"]
-                        logging.info(f"Parsed middle_name: {main_borrower['middle_name']}")
+                        logging.info(f"  ✓ middle_name: {main_borrower['middle_name']}")
                     
-                    if "last_name" in main_borrower and main_borrower["last_name"]:
+                    if main_borrower.get("last_name"):
                         field_updates["4002"] = main_borrower["last_name"]
-                        logging.info(f"Parsed last_name: {main_borrower['last_name']}")
+                        logging.info(f"  ✓ last_name: {main_borrower['last_name']}")
                     
-                    if "email" in main_borrower and main_borrower["email"]:
+                    if main_borrower.get("email"):
                         field_updates["1204"] = main_borrower["email"]
-                        logging.info(f"Parsed email: {main_borrower['email']}")
+                        logging.info(f"  ✓ email: {main_borrower['email']}")
                     
-                    if "ssn" in main_borrower and main_borrower["ssn"]:
+                    if main_borrower.get("ssn"):
                         field_updates["65"] = main_borrower["ssn"]
-                        logging.info(f"Parsed SSN: {main_borrower['ssn']}")
+                        logging.info(f"  ✓ ssn: {main_borrower['ssn']}")
                     
-                    if "date_of_birth" in main_borrower and main_borrower["date_of_birth"]:
+                    if main_borrower.get("date_of_birth"):
                         field_updates["1402"] = main_borrower["date_of_birth"]
-                        logging.info(f"Parsed date_of_birth: {main_borrower['date_of_birth']}")
+                        logging.info(f"  ✓ date_of_birth: {main_borrower['date_of_birth']}")
                 
-                # Parse address information
-                if "city" in loaninfo and loaninfo["city"]:
-                    field_updates["FR0106"] = loaninfo["city"]
-                    logging.info(f"Parsed city: {loaninfo['city']}")
+                # Parse property/address information
+                logging.info(f"Processing property information:")
                 
-                if "address1" in loaninfo and loaninfo["address1"]:
+                if loaninfo.get("address1"):
                     field_updates["FR0126"] = loaninfo["address1"]
-                    logging.info(f"Parsed address1: {loaninfo['address1']}")
+                    logging.info(f"  ✓ address1: {loaninfo['address1']}")
+                
+                if loaninfo.get("city"):
+                    field_updates["FR0106"] = loaninfo["city"]
+                    logging.info(f"  ✓ city: {loaninfo['city']}")
+                
+                if loaninfo.get("state"):
+                    field_updates["FR0107"] = loaninfo["state"]
+                    logging.info(f"  ✓ state: {loaninfo['state']}")
+                
+                if loaninfo.get("zip_code"):
+                    field_updates["FR0108"] = loaninfo["zip_code"]
+                    logging.info(f"  ✓ zip_code: {loaninfo['zip_code']}")
                 
                 # Store parsed field updates in state for push_data_node
                 state.field_updates = field_updates
-                logging.info(f"Created field_updates from loan data: {list(field_updates.keys())}")
-            
-            # Data available in state - no file saving
+                logging.info(f"✅ Created {len(field_updates)} field updates from loan data")
+                logging.info(f"Field IDs: {list(field_updates.keys())}")
             
             state.status = "Success"
         else:
@@ -591,17 +583,18 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         client_id = state.client_id
         loan_id = state.loan_id
         
-        # Parse document_ids from state
+        # Parse document_ids from state - keep as array
         import json
         if state.document_ids:
             try:
                 doc_ids = json.loads(state.document_ids)
-                # Use the first document ID for push_doc
-                doc_id = str(doc_ids[0]) if doc_ids else "953"
+                # Convert to integers if they're numeric strings
+                doc_ids = [int(doc_id) if str(doc_id).isdigit() else doc_id for doc_id in doc_ids]
             except json.JSONDecodeError:
-                doc_id = str(state.document_ids)
+                # If it's not valid JSON, treat as single document ID
+                doc_ids = [state.document_ids]
         else:
-            doc_id = "953"  # Fallback document ID
+            doc_ids = [953]  # Fallback document ID
         
         token = ESFUSE_TOKEN
         api_base = DOC_API_BASE_URL
@@ -611,16 +604,17 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info(f"Creating submission using push_doc method")
         logging.info(f"Client ID: {client_id}")
         logging.info(f"Loan ID: {loan_id}")
-        logging.info(f"Document ID: {doc_id}")
+        logging.info(f"Document IDs: {doc_ids}")
         logging.info(f"API Base: {api_base}")
         logging.info(f"Submission type: {submission_type}")
         logging.info(f"Auto lock: {auto_lock}")
         
-        # Push document using DocumentAgent - wrap in asyncio.to_thread to avoid blocking
+        # Push document using DocumentAgent with array of document IDs
+        # The doc_id parameter should accept the array format
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
-            doc_id=doc_id,
+            doc_id=doc_ids,  # Pass the entire array
             token=token,
             api_base=api_base,
             submission_type=submission_type,
@@ -717,15 +711,15 @@ graph = (
     StateGraph(State)
     .add_node("extract_input", extract_input_fields)
     .add_node("pull_data", pull_data_node)
-    .add_node("pull_doc", pull_doc_node)
+    # .add_node("pull_doc", pull_doc_node)
     .add_node("push_data", push_data_node)
     .add_node("push_doc", push_doc_node)
     .add_node("summary", workflow_summary_node)
     
     .add_edge("__start__", "extract_input")
     .add_edge("extract_input", "pull_data")
-    .add_edge("pull_data", "pull_doc")
-    .add_edge("pull_doc", "push_data")
+    .add_edge("pull_data", "push_data")
+    # .add_edge("pull_doc", "push_data")
     .add_edge("push_data", "push_doc")
     .add_edge("push_doc", "summary")
     .add_edge("summary", "__end__")
