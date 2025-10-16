@@ -582,7 +582,6 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         auto_lock = AUTO_LOCK
         client_id = state.client_id
         loan_id = state.loan_id
-        task_id = state.task_id  # Get task_id from state
         
         # Parse document_ids from state - keep as array
         import json
@@ -605,7 +604,6 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info(f"Creating submission using push_doc method")
         logging.info(f"Client ID: {client_id}")
         logging.info(f"Loan ID: {loan_id}")
-        logging.info(f"Task ID: {task_id}")
         logging.info(f"Document IDs: {doc_ids}")
         logging.info(f"API Base: {api_base}")
         logging.info(f"Submission type: {submission_type}")
@@ -617,11 +615,10 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
-            loan_id=loan_id,  # Required for API path: /loans/{loan_id}/submissions
-            task_id=task_id,  # Required for TaskDoc data extraction
-            doc_id=doc_ids,  # Maps to body: document_ids
-            token=token,  # Maps to query param: ?token=
-            api_base=api_base,
+            direct_loan_id=loan_id,  # Required for API path: /loans/{loan_id}/submissions
+            direct_document_ids=doc_ids,  # Maps to body: document_ids
+            direct_api_token=token,  # Maps to query param: ?token=
+            direct_api_base=api_base,
             submission_type=submission_type,  # Maps to body: submission_type
             auto_lock=auto_lock,  # Maps to body: auto_lock
             taskdoc_api_token=taskdoc_api_token,
