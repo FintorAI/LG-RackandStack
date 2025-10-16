@@ -582,6 +582,7 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         auto_lock = AUTO_LOCK
         client_id = state.client_id
         loan_id = state.loan_id
+        task_id = state.task_id  # Get task_id from state
         
         # Parse document_ids from state - keep as array
         import json
@@ -604,21 +605,25 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info(f"Creating submission using push_doc method")
         logging.info(f"Client ID: {client_id}")
         logging.info(f"Loan ID: {loan_id}")
+        logging.info(f"Task ID: {task_id}")
         logging.info(f"Document IDs: {doc_ids}")
         logging.info(f"API Base: {api_base}")
         logging.info(f"Submission type: {submission_type}")
         logging.info(f"Auto lock: {auto_lock}")
         
         # Push document using DocumentAgent with array of document IDs
-        # The doc_id parameter should accept the array format
+        # API Endpoint: POST /api/v5/loans/:loan_id/submissions?token={{API_TOKEN}}
+        # The library internally uses task_id to extract TaskDoc data before submission
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
-            doc_id=doc_ids,  # Pass the entire array
-            token=token,
+            loan_id=loan_id,  # Required for API path: /loans/{loan_id}/submissions
+            task_id=task_id,  # Required for TaskDoc data extraction
+            doc_id=doc_ids,  # Maps to body: document_ids
+            token=token,  # Maps to query param: ?token=
             api_base=api_base,
-            submission_type=submission_type,
-            auto_lock=auto_lock,
+            submission_type=submission_type,  # Maps to body: submission_type
+            auto_lock=auto_lock,  # Maps to body: auto_lock
             taskdoc_api_token=taskdoc_api_token,
             taskdoc_auth_token=taskdoc_auth_token
         )
