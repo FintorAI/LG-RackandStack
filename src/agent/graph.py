@@ -618,9 +618,9 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
             direct_loan_id=loan_id,  # Required for API path: /loans/{loan_id}/submissions
-            direct_document_ids=doc_ids,  # Maps to body: document_ids
-            direct_api_token=token,  # Maps to query param: ?token=
-            direct_base_url=api_base,
+            # direct_document_ids=doc_ids,  # Maps to body: document_ids
+            # direct_api_token=token,  # Maps to query param: ?token=
+            # direct_base_url=api_base,
             submission_type=submission_type,  # Maps to body: submission_type
             auto_lock=auto_lock,  # Maps to body: auto_lock
             taskdoc_api_token=taskdoc_api_token,
