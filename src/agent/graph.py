@@ -612,6 +612,8 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         # Push document using DocumentAgent with array of document IDs
         # API Endpoint: POST /api/v5/loans/:loan_id/submissions?token={{API_TOKEN}}
         # The library internally uses task_id to extract TaskDoc data before submission
+        logging.info(f"📤 Calling doc_agent.ESFuse.push_doc...")
+        
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
@@ -625,6 +627,7 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
             taskdoc_auth_token=taskdoc_auth_token
         )
         
+        logging.info(f"📦 push_doc returned: {result}")
         # Check if the result contains an error
         if result.get("success", False):
             state.push_doc_result = result
