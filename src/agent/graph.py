@@ -624,7 +624,11 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
             submission_type=submission_type,  # Maps to body: submission_type
             auto_lock=auto_lock,  # Maps to body: auto_lock
             taskdoc_api_token=taskdoc_api_token,
-            taskdoc_auth_token=taskdoc_auth_token
+            taskdoc_auth_token=taskdoc_auth_token,
+
+            doc_id = doc_ids,
+            token = token,
+            api_base = api_base
         )
         
         logging.info(f"📦 push_doc returned: {result}")
