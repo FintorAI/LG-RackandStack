@@ -636,6 +636,11 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info("PUSH_DOC LIBRARY RESPONSES")
         logging.info("=" * 80)
         
+        # Debug: Log what keys are in the result
+        logging.info(f"🔍 Result keys: {list(result.keys()) if isinstance(result, dict) else 'NOT A DICT'}")
+        logging.info(f"🔍 Result type: {type(result)}")
+        logging.info(f"🔍 Full result: {json.dumps(result, indent=2, default=str)}")
+        
         # 1. DocRepo data extraction from ESFuse API
         if "docrepo_response" in result:
             logging.info("\n1️⃣  DocRepo data extraction from ESFuse API:")
