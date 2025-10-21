@@ -631,6 +631,13 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
             api_base = api_base
         )
         
+        # Log the raw result first
+        logging.info("=" * 80)
+        logging.info("RAW PUSH_DOC RESULT")
+        logging.info("=" * 80)
+        logging.info(f"📄 Full Raw Result:\n{json.dumps(result, indent=2, default=str)}")
+        logging.info("=" * 80)
+        
         # Log only the three key responses from the library
         logging.info("=" * 80)
         logging.info("PUSH_DOC LIBRARY RESPONSES")
