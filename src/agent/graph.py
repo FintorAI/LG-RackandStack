@@ -636,25 +636,79 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info("PUSH_DOC LIBRARY RESPONSES")
         logging.info("=" * 80)
         
-        # Debug: Log what keys are in the result
-        logging.info(f"🔍 Result keys: {list(result.keys()) if isinstance(result, dict) else 'NOT A DICT'}")
-        logging.info(f"🔍 Result type: {type(result)}")
-        logging.info(f"🔍 Full result: {json.dumps(result, indent=2, default=str)}")
-        
-        # 1. DocRepo data extraction from ESFuse API
-        if "docrepo_response" in result:
-            logging.info("\n1️⃣  DocRepo data extraction from ESFuse API:")
-            logging.info(json.dumps(result.get("docrepo_response"), indent=2))
-        
-        # 2. get_task call to TaskDoc API (RAW RESPONSE SHOWN)
-        if "taskdoc_response" in result:
-            logging.info("\n2️⃣  get_task call to TaskDoc API (RAW RESPONSE SHOWN):")
-            logging.info(json.dumps(result.get("taskdoc_response"), indent=2))
-        
-        # 3. Submission creation (not executed)
-        if "submission_response" in result:
-            logging.info("\n3️⃣  Submission creation (not executed):")
-            logging.info(json.dumps(result.get("submission_response"), indent=2))
+        # Log detailed push_doc results
+        if result.get("success"):
+            logging.info("✅ push_doc method successful!")
+            logging.info(f"Message: {result.get('message')}")
+            
+            # Extract docrepo_fields which contains all the data
+            docrepo_fields = result.get("docrepo_fields", {})
+            
+            if docrepo_fields:
+                # 1. Basic DocRepo fields
+                logging.info("\n1️⃣  DOCREPO EXTRACTION RESULTS:")
+                logging.info(f"   Task ID: {docrepo_fields.get('taskId', 'N/A')}")
+                logging.info(f"   Loan ID: {docrepo_fields.get('loanId', 'N/A')}")
+                logging.info(f"   Client ID: {docrepo_fields.get('clientId', 'N/A')}")
+                logging.info(f"   Doc ID: {docrepo_fields.get('docId', 'N/A')}")
+                logging.info(f"   Has Task ID: {docrepo_fields.get('hasTaskId', False)}")
+                logging.info(f"   Has Loan ID: {docrepo_fields.get('hasLoanId', False)}")
+                
+                # Check for errors
+                if 'docrepo_error' in docrepo_fields:
+                    logging.error(f"   ❌ DocRepo Error: {docrepo_fields['docrepo_error']}")
+                
+                # 2. TaskDoc integration results
+                if 'task_details' in docrepo_fields:
+                    logging.info("\n2️⃣  TASKDOC INTEGRATION RESULTS:")
+                    task_details = docrepo_fields['task_details']
+                    logging.info(f"   Task Status: {task_details.get('status', 'N/A')}")
+                    logging.info(f"   Fallback Used: {task_details.get('fallback_used', 'N/A')}")
+                    
+                    if 'taskdoc_document_ids' in docrepo_fields:
+                        doc_ids = docrepo_fields['taskdoc_document_ids']
+                        logging.info(f"   Document IDs: {len(doc_ids)} documents")
+                        logging.info(f"      IDs: {doc_ids[:5]}{'...' if len(doc_ids) > 5 else ''}")
+                    
+                    if 'taskdoc_loan_id' in docrepo_fields:
+                        logging.info(f"   TaskDoc Loan ID: {docrepo_fields['taskdoc_loan_id']}")
+                    
+                    if 'taskdoc_root_url' in docrepo_fields:
+                        logging.info(f"   TaskDoc Root URL: {docrepo_fields['taskdoc_root_url']}")
+                    
+                    if 'taskdoc_workflow_state' in docrepo_fields:
+                        logging.info(f"   Workflow State: {docrepo_fields['taskdoc_workflow_state']}")
+                    
+                    if 'taskdoc_assignee' in docrepo_fields:
+                        assignee = docrepo_fields['taskdoc_assignee']
+                        logging.info(f"   Assignee: {assignee.get('first_name')} {assignee.get('last_name')} ({assignee.get('username')})")
+                
+                # 3. Submission results
+                if 'submission_result' in docrepo_fields:
+                    logging.info("\n3️⃣  SUBMISSION RESULTS:")
+                    submission = docrepo_fields['submission_result']
+                    logging.info(f"   Success: {submission.get('success')}")
+                    logging.info(f"   Status Code: {submission.get('status_code', 'N/A')}")
+                    
+                    if submission.get('success'):
+                        logging.info("   ✅ Submission created successfully!")
+                        if 'response' in submission:
+                            response = submission['response']
+                            logging.info(f"   Submission Response: {json.dumps(response, indent=2, default=str)}")
+                    else:
+                        logging.error(f"   ❌ Submission failed: {submission.get('error', 'Unknown error')}")
+                        if 'response_text' in submission:
+                            logging.error(f"   Response text: {submission['response_text']}")
+                    
+                    if 'submission_url' in submission:
+                        logging.info(f"   Submission URL: {submission['submission_url']}")
+                    if 'submission_body' in submission:
+                        body = submission['submission_body']
+                        logging.info(f"   Document Count: {len(body.get('document_ids', []))}")
+                        logging.info(f"   Submission Body: {json.dumps(body, indent=2)}")
+        else:
+            logging.error("❌ push_doc method failed!")
+            logging.error(f"Error: {result.get('error', 'Unknown error')}")
         
         logging.info("=" * 80)
         
