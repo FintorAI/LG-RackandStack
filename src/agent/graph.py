@@ -631,26 +631,32 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
             api_base = api_base
         )
         
-        logging.info(f"📦 push_doc returned: {result}")
+        # Log only the three key responses from the library
+        logging.info("=" * 80)
+        logging.info("PUSH_DOC LIBRARY RESPONSES")
+        logging.info("=" * 80)
+        
+        # 1. DocRepo data extraction from ESFuse API
+        if "docrepo_response" in result:
+            logging.info("\n1️⃣  DocRepo data extraction from ESFuse API:")
+            logging.info(json.dumps(result.get("docrepo_response"), indent=2))
+        
+        # 2. get_task call to TaskDoc API (RAW RESPONSE SHOWN)
+        if "taskdoc_response" in result:
+            logging.info("\n2️⃣  get_task call to TaskDoc API (RAW RESPONSE SHOWN):")
+            logging.info(json.dumps(result.get("taskdoc_response"), indent=2))
+        
+        # 3. Submission creation (not executed)
+        if "submission_response" in result:
+            logging.info("\n3️⃣  Submission creation (not executed):")
+            logging.info(json.dumps(result.get("submission_response"), indent=2))
+        
+        logging.info("=" * 80)
+        
         # Check if the result contains an error
         if result.get("success", False):
             state.push_doc_result = result
             state.loan_data = result
-            logging.info(f"Successfully created loan submission")
-            logging.info(f"Message: {result.get('message', 'N/A')}")
-            
-            # Log DocRepo fields if available
-            docrepo_fields = result.get("docrepo_fields", {})
-            if docrepo_fields:
-                logging.info(f"Task ID: {docrepo_fields.get('taskId', 'N/A')}")
-                logging.info(f"Loan ID: {docrepo_fields.get('loanId', 'N/A')}")
-                
-                # Log submission results if available
-                submission_result = docrepo_fields.get('submission_result', {})
-                if submission_result:
-                    logging.info(f"Submission Success: {submission_result.get('success', False)}")
-                    logging.info(f"Submission Status Code: {submission_result.get('status_code', 'N/A')}")
-            
             state.status = "Success"
         else:
             error_msg = result.get('error', 'Unknown error')
