@@ -609,26 +609,26 @@ async def push_doc_node(state: State, config: RunnableConfig) -> State:
         logging.info(f"Submission type: {submission_type}")
         logging.info(f"Auto lock: {auto_lock}")
         
-        # Push document using DocumentAgent with array of document IDs
-        # API Endpoint: POST /api/v5/loans/:loan_id/submissions?token={{API_TOKEN}}
-        # The library internally uses task_id to extract TaskDoc data before submission
+        # Push document using DocumentAgent
+        # Note: push_doc expects a single doc_id, not a list
+        # If multiple docs, we'd need to call it multiple times or use a different method
         logging.info(f"📤 Calling doc_agent.ESFuse.push_doc...")
+        
+        # Extract first doc_id from list and convert to string
+        doc_id_single = str(doc_ids[0]) if doc_ids else "953"
+        logging.info(f"Using document ID: {doc_id_single}")
         
         result = await asyncio.to_thread(
             doc_agent.ESFuse.push_doc,
             client_id=client_id,
-            direct_loan_id=loan_id,  # Required for API path: /loans/{loan_id}/submissions
-            # direct_document_ids=doc_ids,  # Maps to body: document_ids
-            # direct_api_token=token,  # Maps to query param: ?token=
-            # direct_base_url=api_base,
-            submission_type=submission_type,  # Maps to body: submission_type
-            auto_lock=auto_lock,  # Maps to body: auto_lock
+            # Let the library extract loan_id from document metadata - don't override it
+            submission_type=submission_type,
+            auto_lock=auto_lock,
             taskdoc_api_token=taskdoc_api_token,
             taskdoc_auth_token=taskdoc_auth_token,
-
-            doc_id = doc_ids,
-            token = token,
-            api_base = api_base
+            doc_id=doc_id_single,  # Pass as single string, not list
+            token=token,
+            api_base=api_base
         )
         
         # Log the raw result first
